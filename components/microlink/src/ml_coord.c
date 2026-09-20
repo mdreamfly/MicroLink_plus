@@ -81,6 +81,9 @@ static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t max_len) {
     return hex_len / 2;
 }
 
+/* Forward declaration (defined later, used by do_register) */
+static int add_advertise_routes_to_json(microlink_t *ml, cJSON *hostinfo);
+
 /* ============================================================================
  * TCP I/O helpers for coord socket (owned exclusively by this task)
  * ========================================================================== */
@@ -730,6 +733,10 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
 
     cJSON_AddItemToObject(root, "Hostinfo", hostinfo);
 
+    /* RoutableIPs: subnet router mode — tell control plane which subnets
+     * this node routes (must be approved in admin console) */
+    add_advertise_routes_to_json(ml, hostinfo);
+
     /* NodeKeyChallengeResponse - prove we own the WireGuard private key
      * Server sends challenge public key in EarlyNoise; we respond with
      * X25519(wg_private_key, challenge_public_key). (v1 lines 1754-1785) */
@@ -1300,6 +1307,50 @@ static int add_endpoints_to_json(microlink_t *ml, cJSON *root) {
     return count;
 }
 
+/* Add RoutableIPs array (subnet router mode) to the Hostinfo object.
+ * Tailscale advertises subnet routes via Hostinfo.RoutableIPs — a
+ * []netip.Prefix that JSON-encodes as plain CIDR strings like "10.39.0.0/16".
+ * (There is no top-level AdvertiseRoutes field in the control protocol.)
+ * Parses comma-separated CIDRs from config. No-op when disabled. */
+static int add_advertise_routes_to_json(microlink_t *ml, cJSON *hostinfo) {
+    const char *routes = ml->config.advertise_routes;
+    if (!routes || routes[0] == '\0') return 0;
+
+    cJSON *arr = cJSON_AddArrayToObject(hostinfo, "RoutableIPs");
+    if (!arr) return 0;
+
+    /* Parse comma-separated list on a scratch copy (strtok_r modifies input) */
+    size_t len = strlen(routes);
+    if (len == 0) return 0;
+    char *scratch = ml_psram_malloc(len + 1);
+    if (!scratch) return 0;
+    memcpy(scratch, routes, len + 1);
+
+    int count = 0;
+    char *saveptr = NULL;
+    char *tok = strtok_r(scratch, ",", &saveptr);
+    while (tok) {
+        /* Trim whitespace */
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char *end = tok + strlen(tok);
+        while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        *end = '\0';
+        if (tok[0]) {
+            cJSON_AddItemToArray(arr, cJSON_CreateString(tok));
+            count++;
+        }
+        tok = strtok_r(NULL, ",", &saveptr);
+    }
+    free(scratch);
+
+    if (count == 0) {
+        cJSON_DeleteItemFromObject(hostinfo, "RoutableIPs");
+    } else {
+        ESP_LOGI(TAG, "RoutableIPs: %d subnet route(s) advertised", count);
+    }
+    return count;
+}
+
 static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
     int64_t t_map_start = esp_timer_get_time();
 
@@ -1350,9 +1401,13 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
      * control plane processes these, unlike Stream=true with Version >= 68) */
     add_endpoints_to_json(ml, root);
 
+    /* RoutableIPs: keep subnet routes registered with control plane */
+    add_advertise_routes_to_json(ml, hostinfo);
+
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json_str) return -1;
+    ESP_LOGI(TAG, "MapRequest: %d bytes (Stream=false)", (int)strlen(json_str));
 
     size_t json_len = strlen(json_str);
     ESP_LOGI(TAG, "MapRequest: %d bytes (Stream=false)", (int)json_len);
@@ -1832,6 +1887,9 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
         cJSON_AddItemToObject(hostinfo, "NetInfo", netinfo);
     }
 
+    /* RoutableIPs: keep subnet routes registered on long-poll too */
+    add_advertise_routes_to_json(ml, hostinfo);
+
     /* Stream=true for long-poll, KeepAlive=true so server sends keepalives
      * (which marks us as "online" on the control plane) */
     cJSON_AddBoolToObject(root, "Stream", true);
@@ -1936,6 +1994,9 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
 
     /* Endpoints + EndpointTypes */
     int ep_count = add_endpoints_to_json(ml, root);
+
+    /* RoutableIPs: keep subnet routes registered on endpoint updates too */
+    add_advertise_routes_to_json(ml, hostinfo);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

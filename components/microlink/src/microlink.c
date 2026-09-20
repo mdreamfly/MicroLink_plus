@@ -198,6 +198,16 @@ microlink_t *microlink_init(const microlink_config_t *config) {
         }
     }
 
+    /* Apply Kconfig advertise routes if app didn't provide any (subnet router) */
+    if ((ml->config.advertise_routes == NULL || ml->config.advertise_routes[0] == '\0')
+        && strlen(CONFIG_ML_ADVERTISE_ROUTES) > 0) {
+        ml->config.advertise_routes = CONFIG_ML_ADVERTISE_ROUTES;
+        ESP_LOGI(TAG, "Advertise routes from Kconfig: %s", CONFIG_ML_ADVERTISE_ROUTES);
+    }
+    if (ml->config.advertise_routes && ml->config.advertise_routes[0]) {
+        ESP_LOGI(TAG, "Subnet router mode: advertising routes %s", ml->config.advertise_routes);
+    }
+
     /* Load or generate persistent keys */
     if (load_or_generate_keys(ml) != ESP_OK) {
         free(ml);
@@ -267,6 +277,16 @@ microlink_t *microlink_init(const microlink_config_t *config) {
         ml->debug_flags = ml_config_get_debug_flags(ml->config_httpd);
         if (ml->debug_flags) {
             ESP_LOGI(TAG, "Debug flags from NVS: 0x%02x", ml->debug_flags);
+        }
+
+        /* Subnet routes: NVS (web UI) overrides Kconfig/app config.
+         * Non-empty because config_load_settings() seeds from Kconfig. */
+        const char *nvs_routes = ml_config_get_advertise_routes(ml->config_httpd);
+        if (nvs_routes) {
+            strncpy(ml->nvs_advertise_routes, nvs_routes,
+                    sizeof(ml->nvs_advertise_routes) - 1);
+            ml->config.advertise_routes = ml->nvs_advertise_routes;
+            ESP_LOGI(TAG, "Advertise routes from NVS: %s", ml->nvs_advertise_routes);
         }
     }
 

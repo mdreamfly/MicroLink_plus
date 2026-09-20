@@ -14,11 +14,11 @@
 ## 数据流
 
 ```
-PC (100.88.86.24) ──WG隧道──> ESP32 WG netif (解密)
+PC (100.64.0.2) ──WG隧道──> ESP32 WG netif (解密)
     → lwIP 转发 (IP_FORWARD): 目标 10.39.0.5 → WiFi netif
     → NAPT SNAT: 源改写为 ESP32 的 10.39.x.x WiFi 地址
     → 10.39.0.5 收到包，回包给 ESP32 (10.39.x.x)
-    → ESP32 WiFi netif 收到，DNAT 查表还原目标 = 100.88.86.24
+    → ESP32 WiFi netif 收到，DNAT 查表还原目标 = 100.64.0.2
     → 路由到 WG netif → wireguardif_output 按目标 IP 匹配 peer → 加密回 PC
 ```
 

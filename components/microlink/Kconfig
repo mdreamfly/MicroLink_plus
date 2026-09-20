@@ -48,6 +48,23 @@ menu "MicroLink V2 Configuration"
             Can also be set at runtime via the HTTP config server web UI.
             Leave empty to disable (all peers treated equally).
 
+    config ML_ADVERTISE_ROUTES
+        string "Advertised subnet routes (subnet router mode)"
+        default ""
+        help
+            Comma-separated list of CIDR subnets to advertise to the tailnet
+            as a subnet router (e.g., "10.39.0.0/16"). Other tailnet devices
+            can then reach devices in these subnets through this node.
+
+            Requires:
+            - Routes approved in the Tailscale admin console (or a
+              pre-authorized auth key created with --advertise-routes).
+            - Accessing devices must enable --accept-routes.
+            - CONFIG_LWIP_IP_FORWARD and CONFIG_LWIP_IPV4_NAPT enabled
+              (added to sdkconfig.defaults for the examples).
+
+            Leave empty to disable subnet routing (normal client mode).
+
     config ML_NVS_MAX_PEERS
         int "Maximum cached peers in NVS"
         default 64
@@ -320,6 +337,19 @@ menu "MicroLink V2 Configuration"
                 When the allowlist is empty, all peers are probed (backwards
                 compatible). When populated, only listed peers receive
                 outbound DISCO probes and WG peer table slots.
+
+        config ML_CONFIG_PASSWORD
+            string "Web admin password (HTTP Basic auth)"
+            depends on ML_ENABLE_CONFIG_HTTPD
+            default "microlink"
+            help
+                Initial admin password for the config web UI. Stored in NVS and
+                changeable at runtime via the web UI ("Change Password").
+
+                WARNING: "microlink" is an insecure default — change it.
+
+                Fail-closed: if both NVS and this Kconfig value are empty,
+                every request to the config server returns 401.
 
     endmenu
 

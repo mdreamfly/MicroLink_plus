@@ -27,7 +27,7 @@ set(REQUIRES
     esp_timer
     lwip
     mbedtls
-    json
+    cjson
     driver
     esp_driver_tsens
     esp_http_server
@@ -38,7 +38,11 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
         "src"
-    REQUIRES ${REQUIRES}
+    REQUIRES
+        ${REQUIRES}
+        mbedtls_v3_shim
     PRIV_REQUIRES
         wireguard_lwip
+        esp_driver_uart
+        esp_driver_gpio
 )

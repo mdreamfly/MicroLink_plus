@@ -176,7 +176,7 @@ char advertise_routes[128];  /* 逗号分隔 CIDR，如 "10.39.0.0/16" */
 
 1. 构建 + 烧录 COM7（`idf_build.cmd`）
 2. 串口日志：无崩溃、`admin password seeded (Kconfig/NVS)` 日志
-3. 无凭据 `curl -i http://100.127.58.97/` → 401 + `WWW-Authenticate`
+3. 无凭据 `curl -i http://100.64.0.1/` → 401 + `WWW-Authenticate`
 4. 错误密码 → 401；正确密码 `-u admin:microlink` → 200 JSON
 5. `POST /api/password` 改密 → 旧密码 401，新密码 200
 6. 浏览器：登录框 → 仪表盘 → 改密 → 重登录

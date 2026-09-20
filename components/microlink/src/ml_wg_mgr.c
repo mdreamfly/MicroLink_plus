@@ -24,6 +24,7 @@
 #include "lwip/ip_addr.h"
 #include "lwip/ip.h"
 #include "lwip/tcpip.h"
+#include "lwip/lwip_napt.h"
 #include "nacl_box.h"
 #include "wireguardif.h"
 #include "wireguard.h"
@@ -268,9 +269,31 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
     netif->next = netif_list;
     netif_list = netif;
 
-    /* Bring interface up */
+    /* Bring interface up.
+     * IMPORTANT: netif->state holds our wireguard_device struct, but ESP-IDF's
+     * global lwIP ext callback (netif_callback_fn → lwip_get_esp_netif) casts
+     * netif->state to esp_netif_t* when LWIP_ESP_NETIF_DATA=0. Calling
+     * netif_set_up() with state set triggers that callback which then reads
+     * esp_netif->lwip_netif from garbage → LoadProhibited panic.
+     * Temporarily clear state during the set calls (same pattern wireguardif.c
+     * uses internally around netif_set_link_up), then restore. */
+    void *wg_state = netif->state;
+    netif->state = NULL;
     netif_set_up(netif);
     netif_set_link_up(netif);
+    netif->state = wg_state;
+
+#if CONFIG_LWIP_IPV4_NAPT
+    /* Enable NAPT on the WG interface (subnet router mode).
+     * Forwarded packets from the WG side get SNAT'd to the ESP32's LAN IP,
+     * and replies from LAN devices are DNAT'd back through the tunnel.
+     * No return-route config needed on LAN devices (10.39.x.x). */
+    if (ip_napt_enable_netif(netif, 1)) {
+        ESP_LOGI(TAG, "NAPT enabled on WG interface (subnet router mode)");
+    } else {
+        ESP_LOGW(TAG, "NAPT enable failed (netif not up?)");
+    }
+#endif
 
     /* Create raw UDP PCB for WG output (avoids BSD sendto deadlock on TCPIP
      * thread).  Bind to port 51820 to match the DISCO socket source port.
@@ -1643,8 +1666,13 @@ void ml_wg_mgr_task(void *arg) {
     if (ml->wg_netif) {
         struct netif *netif = (struct netif *)ml->wg_netif;
         wireguardif_shutdown(netif);
+        /* Same state-protection as init: ext callback casts netif->state to
+         * esp_netif_t*, so clear it around the set_down calls. */
+        void *wg_state = netif->state;
+        netif->state = NULL;
         netif_set_link_down(netif);
         netif_set_down(netif);
+        netif->state = wg_state;
         vTaskDelay(pdMS_TO_TICKS(100));
         netif_remove(netif);
         free(netif);

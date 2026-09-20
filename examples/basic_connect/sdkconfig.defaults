@@ -1,52 +1,97 @@
-# MicroLink v2 - ESP32-S3 sdkconfig defaults
-# Target
+# =========================================================
+# MicroLink v2 - ESP32-S3 4MB Flash / 2MB PSRAM
+# =========================================================
+
 CONFIG_IDF_TARGET="esp32s3"
 
-# PSRAM (required for large buffers)
+# ---------------------------------------------------------
+# PSRAM
+# Your board: ESP32-S3 + 2MB Quad PSRAM
+# ---------------------------------------------------------
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
-# lwIP (WireGuard needs raw sockets + larger buffers)
-CONFIG_LWIP_MAX_SOCKETS=16
-CONFIG_LWIP_SO_RCVBUF=y
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
-CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
-# mbedTLS (Noise protocol needs ChaCha20-Poly1305)
+# ---------------------------------------------------------
+# Flash
+# ---------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# ---------------------------------------------------------
+# Partition
+# Single app - suitable for 4MB Flash
+# SINGLE_APP_LARGE (1500K) gives headroom for IP_FORWARD + NAPT
+# (subnet router mode), which add ~5KB to the firmware.
+# ---------------------------------------------------------
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# CONFIG_PARTITION_TABLE_SINGLE_APP is not set
+
+# ---------------------------------------------------------
+# lwIP
+# Keep memory usage reasonable for 2MB PSRAM
+# ---------------------------------------------------------
+CONFIG_LWIP_MAX_SOCKETS=12
+CONFIG_LWIP_SO_RCVBUF=y
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# ---------------------------------------------------------
+# IP Forwarding + NAPT (subnet router mode)
+# Lets tailnet peers reach LAN subnets (10.39.0.0/16) through
+# this ESP32. NAPT SNAT/DNATs forwarded traffic so LAN devices
+# need no return-route configuration.
+# ---------------------------------------------------------
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+
+# ---------------------------------------------------------
+# mbedTLS / Tailscale Noise
+# ---------------------------------------------------------
 CONFIG_MBEDTLS_CHACHA20_C=y
 CONFIG_MBEDTLS_POLY1305_C=y
 CONFIG_MBEDTLS_CHACHAPOLY_C=y
 CONFIG_MBEDTLS_HKDF_C=y
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
 
+# ---------------------------------------------------------
 # FreeRTOS
+# ---------------------------------------------------------
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 
-# WiFi — low-latency tuning for WireGuard traffic
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+# ---------------------------------------------------------
+# WiFi
+# ---------------------------------------------------------
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 
-# CPU frequency (240MHz for crypto performance)
+# ---------------------------------------------------------
+# CPU
+# ---------------------------------------------------------
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
-# Watchdog (extended for TLS handshakes)
+# ---------------------------------------------------------
+# Watchdog
+# ---------------------------------------------------------
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
-# Partition table
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
-
-# Log level
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-
-# HTTP Config Server (runtime WiFi/auth/peer config via web UI)
+# ---------------------------------------------------------
+# HTTP configuration server
+# ---------------------------------------------------------
 CONFIG_ML_ENABLE_CONFIG_HTTPD=y
-CONFIG_ML_CONFIG_MAX_ALLOWED_PEERS=512
+CONFIG_ML_CONFIG_MAX_ALLOWED_PEERS=16
 
-# Priority peer (guaranteed WG slot even when peer table is full)
+# ---------------------------------------------------------
+# Priority peer
+# ---------------------------------------------------------
 CONFIG_ML_PRIORITY_PEER_IP=""

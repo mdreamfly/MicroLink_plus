@@ -45,6 +45,12 @@ typedef struct {
     uint32_t disco_heartbeat_ms;    /* DISCO keepalive interval (default: 3000) */
     uint32_t stun_interval_ms;      /* STUN re-probe interval (default: 23000) */
     uint32_t ctrl_watchdog_ms;      /* Control plane watchdog timeout (default: 120000) */
+
+    /* Advertised subnet routes (subnet router mode).
+     * Comma-separated CIDR list, e.g. "10.39.0.0/16" or "10.0.0.0/8,172.16.0.0/12".
+     * Empty/NULL disables subnet routing. Requires routes approved in the
+     * Tailscale admin console and CONFIG_LWIP_IP_FORWARD + CONFIG_LWIP_IPV4_NAPT. */
+    const char *advertise_routes;
 } microlink_config_t;
 
 /* Peer info (read-only snapshot) */

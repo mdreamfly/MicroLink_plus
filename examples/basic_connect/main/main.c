@@ -210,6 +210,55 @@ static void wifi_init(void) {
 }
 
 /* ============================================================================
+ * SoftAP provisioning (no reachable WiFi → serve config page on device's AP)
+ * ========================================================================== */
+
+#define SOFTAP_SSID              "MicroLink-Config"
+#define WIFI_CONNECT_TIMEOUT_MS  (45 * 1000)
+
+/* Bring up the device's own WiFi AP (open; the config page still requires
+ * the admin password). Serves the config page at http://192.168.4.1 so the
+ * device can be onboarded onto a new network without any prior connection. */
+static esp_err_t enable_softap(void) {
+    esp_wifi_stop();
+    esp_netif_create_default_wifi_ap();
+
+    wifi_config_t ap = {0};
+    strncpy((char *)ap.ap.ssid, SOFTAP_SSID, sizeof(ap.ap.ssid) - 1);
+    ap.ap.ssid_len = strlen(SOFTAP_SSID);
+    ap.ap.channel = 1;
+    ap.ap.max_connection = 4;
+    ap.ap.authmode = WIFI_AUTH_OPEN;   /* open AP; page login still required */
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    return ESP_OK;
+}
+
+/* Serve the config page over the SoftAP until the user configures WiFi and
+ * reboots (the page's Restart button exits provisioning into normal mode). */
+static void run_provisioning_mode(void) {
+    if (enable_softap() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start SoftAP provisioning");
+        return;
+    }
+
+    ml_config_ctx_t *cfg = ml_config_httpd_init();
+    if (cfg) {
+        ml_config_httpd_start(cfg, NULL);
+    }
+
+    ESP_LOGW(TAG, "No WiFi — SoftAP provisioning mode active");
+    ESP_LOGW(TAG, "  Connect to WiFi '%s' (open), then open http://192.168.4.1", SOFTAP_SSID);
+    ESP_LOGW(TAG, "  Configure WiFi, then press Restart. Device reboots into WiFi.");
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
+/* ============================================================================
  * Main
  * ========================================================================== */
 
@@ -251,9 +300,22 @@ void app_main(void) {
     /* Initialize WiFi */
     wifi_init();
 
-    /* Wait for WiFi connection */
-    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT,
-                         pdFALSE, pdTRUE, portMAX_DELAY);
+    /* Wait for WiFi with a timeout; if none is reachable (new environment or
+     * nothing configured), fall back to SoftAP provisioning so the config
+     * page is still reachable at http://192.168.4.1. */
+    bool have_wifi_config = (wifi_list_count > 0) || (wifi_ssid[0] != '\0');
+    bool wifi_ok = false;
+    if (have_wifi_config) {
+        EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT,
+                                                pdFALSE, pdTRUE,
+                                                pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+        wifi_ok = (bits & WIFI_CONNECTED_BIT) != 0;
+    }
+
+    if (!wifi_ok) {
+        run_provisioning_mode();
+        return;  /* never returns — serves config until reboot */
+    }
 
     /* Initialize MicroLink
      * Auth key and device name come from Kconfig here, but microlink_init()

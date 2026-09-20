@@ -41,8 +41,10 @@ struct microlink_s;
  *   v1: Original fields (wifi, auth, device, cellular, flags)
  *   v2: Added max_peers, disco_heartbeat_ms, priority_peer_ip,
  *       ctrl_host, debug_flags
+ *   v3: Added device_name_full, ppp_user, ppp_pass
+ *   v4: Added admin_pass (HTTP Basic auth), advertise_routes
  */
-#define ML_CONFIG_SETTINGS_VERSION  3
+#define ML_CONFIG_SETTINGS_VERSION  4
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;               /* Schema version (ML_CONFIG_SETTINGS_VERSION) */
@@ -69,6 +71,11 @@ typedef struct __attribute__((packed)) {
                                        Empty = use device_prefix + MAC suffix */
     char     ppp_user[32];          /* PPP username (blank = none) */
     char     ppp_pass[32];          /* PPP password (blank = none) */
+
+    /* --- v4 fields (appended, packed layout unchanged) --- */
+    char     admin_pass[64];        /* Web admin password (HTTP Basic auth) */
+    char     advertise_routes[128]; /* Comma-separated CIDRs for subnet router,
+                                       e.g. "10.39.0.0/16, 192.168.1.0/24" */
 } ml_config_settings_t;
 
 /* Peer allowlist entry */
@@ -168,6 +175,9 @@ uint8_t     ml_config_get_debug_flags(const ml_config_ctx_t *ctx);
 /* v3 getter — full custom device name (overrides prefix+MAC) */
 const char *ml_config_get_device_name_full(const ml_config_ctx_t *ctx);
 
+/* v4 getter — advertised subnet routes (NVS overrides Kconfig seed) */
+const char *ml_config_get_advertise_routes(const ml_config_ctx_t *ctx);
+
 /**
  * @brief Read WiFi credentials from NVS without full config init
  *
@@ -249,6 +259,7 @@ static inline const char *ml_config_get_wifi_pass(const ml_config_ctx_t *c) { (v
 static inline const char *ml_config_get_auth_key(const ml_config_ctx_t *c) { (void)c; return NULL; }
 static inline const char *ml_config_get_device_prefix(const ml_config_ctx_t *c) { (void)c; return NULL; }
 static inline const char *ml_config_get_device_name_full(const ml_config_ctx_t *c) { (void)c; return NULL; }
+static inline const char *ml_config_get_advertise_routes(const ml_config_ctx_t *c) { (void)c; return NULL; }
 static inline uint8_t ml_config_get_max_peers(const ml_config_ctx_t *c) { (void)c; return 0; }
 static inline uint16_t ml_config_get_disco_heartbeat_ms(const ml_config_ctx_t *c) { (void)c; return 0; }
 static inline uint32_t ml_config_get_priority_peer_ip(const ml_config_ctx_t *c) { (void)c; return 0; }

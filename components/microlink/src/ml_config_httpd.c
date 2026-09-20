@@ -26,6 +26,8 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "cJSON.h"
+#include "mbedtls/base64.h"
+#include "mbedtls/constant_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
@@ -115,11 +117,23 @@ static void config_load_settings(ml_config_ctx_t *ctx) {
     SEED_STR(ctx->settings.wifi_pass,    CONFIG_ML_WIFI_PASSWORD);
     SEED_STR(ctx->settings.auth_key,     CONFIG_ML_TAILSCALE_AUTH_KEY);
     SEED_STR(ctx->settings.device_prefix, CONFIG_ML_DEVICE_NAME);
+    SEED_STR(ctx->settings.admin_pass,   CONFIG_ML_CONFIG_PASSWORD);
+    SEED_STR(ctx->settings.advertise_routes, CONFIG_ML_ADVERTISE_ROUTES);
     if (ctx->settings.priority_peer_ip == 0 && strlen(CONFIG_ML_PRIORITY_PEER_IP) > 0) {
         ctx->settings.priority_peer_ip = microlink_parse_ip(CONFIG_ML_PRIORITY_PEER_IP);
     }
 
     #undef SEED_STR
+
+    if (ctx->settings.admin_pass[0]) {
+        ESP_LOGI(TAG, "Admin password seeded (Kconfig/NVS)");
+    } else {
+        ESP_LOGW(TAG, "Admin password EMPTY — fail-closed: all HTTP requests will 401");
+    }
+    if (ctx->settings.advertise_routes[0]) {
+        ESP_LOGI(TAG, "Advertise routes seeded (Kconfig/NVS): %s",
+                 ctx->settings.advertise_routes);
+    }
 
     ESP_LOGI(TAG, "Settings v%d (wifi=%s, prefix=%s, name=%s, max_peers=%d, ctrl=%s, pip=%s)",
              ctx->settings.version,
@@ -338,6 +352,72 @@ const char *ml_config_get_device_name_full(const ml_config_ctx_t *ctx) {
     return ctx->settings.device_name_full;
 }
 
+const char *ml_config_get_advertise_routes(const ml_config_ctx_t *ctx) {
+    if (!ctx || ctx->settings.advertise_routes[0] == '\0') return NULL;
+    return ctx->settings.advertise_routes;
+}
+
+/* ============================================================================
+ * HTTP Basic Authentication
+ *
+ * Every handler is gated by AUTH_GATE(req) at the top.  The browser prompts
+ * natively via the 401 + WWW-Authenticate response, then automatically sends
+ * the Authorization header on all same-origin requests (including the page's
+ * fetch() calls), so existing frontend JS needs no changes.
+ *
+ * fail-closed: if the stored password is empty, all requests return 401.
+ * ========================================================================== */
+
+/* Constant-time string equality (prevents password length/timing leakage) */
+static bool ct_str_eq(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    if (la != lb) return false;
+    return mbedtls_ct_memcmp(a, b, la) == 0;
+}
+
+/* Parse and validate "Authorization: Basic base64("admin:<password>")" */
+static bool ml_config_auth_ok(httpd_req_t *req, const char *stored_pass) {
+    if (!stored_pass || stored_pass[0] == '\0') return false;  /* fail-closed */
+
+    char hdr[256];
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
+        return false;
+    }
+    if (strncmp(hdr, "Basic ", 6) != 0) return false;
+
+    char decoded[192];  /* admin + ':' + password (max 64) */
+    size_t dlen = 0;
+    int ret = mbedtls_base64_decode((unsigned char *)decoded, sizeof(decoded) - 1,
+                                    &dlen, (const unsigned char *)hdr + 6,
+                                    strlen(hdr) - 6);
+    if (ret != 0 || dlen == 0) return false;
+    decoded[dlen] = '\0';
+
+    /* Format: "admin:<password>" */
+    const char *colon = strchr(decoded, ':');
+    if (!colon) return false;
+    if ((size_t)(colon - decoded) != 5 || strncmp(decoded, "admin", 5) != 0) {
+        return false;
+    }
+    return ct_str_eq(colon + 1, stored_pass);
+}
+
+/* Send 401 + WWW-Authenticate challenge */
+static esp_err_t ml_config_auth_fail(httpd_req_t *req) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"MicroLink\"");
+    httpd_resp_sendstr(req, "Authentication required");
+    return ESP_FAIL;
+}
+
+#define AUTH_GATE(req) do { \
+    ml_config_ctx_t *_auth_ctx = (ml_config_ctx_t *)(req)->user_ctx; \
+    if (!ml_config_auth_ok((req), _auth_ctx->settings.admin_pass)) \
+        return ml_config_auth_fail((req)); \
+} while (0)
+
 /* ============================================================================
  * HTTP Handlers
  * ========================================================================== */
@@ -380,6 +460,8 @@ static char *read_post_body(httpd_req_t *req) {
 
 /* GET / — serve HTML config page */
 static esp_err_t handler_root(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr(req, CONFIG_PAGE_HTML);
     return ESP_OK;
@@ -387,6 +469,8 @@ static esp_err_t handler_root(httpd_req_t *req) {
 
 /* GET /api/status */
 static esp_err_t handler_status(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
     microlink_t *ml = ctx->ml;
 
@@ -423,6 +507,8 @@ static esp_err_t handler_status(httpd_req_t *req) {
 
 /* GET /api/settings */
 static esp_err_t handler_get_settings(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     cJSON *json = cJSON_CreateObject();
@@ -453,12 +539,15 @@ static esp_err_t handler_get_settings(httpd_req_t *req) {
     cJSON_AddStringToObject(json, "ctrl_host", ctx->settings.ctrl_host);
     cJSON_AddNumberToObject(json, "debug_flags", ctx->settings.debug_flags);
     cJSON_AddStringToObject(json, "device_name_full", ctx->settings.device_name_full);
+    cJSON_AddStringToObject(json, "advertise_routes", ctx->settings.advertise_routes);
 
     return send_json(req, json);
 }
 
 /* POST /api/settings */
 static esp_err_t handler_post_settings(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     char *body = read_post_body(req);
@@ -541,6 +630,9 @@ static esp_err_t handler_post_settings(httpd_req_t *req) {
     if ((item = cJSON_GetObjectItem(json, "device_name_full")) && cJSON_IsString(item)) {
         COPY_STR_FIELD(ctx->settings.device_name_full, item->valuestring);
     }
+    if ((item = cJSON_GetObjectItem(json, "advertise_routes")) && cJSON_IsString(item)) {
+        COPY_STR_FIELD(ctx->settings.advertise_routes, item->valuestring);
+    }
     #undef COPY_STR_FIELD
     cJSON_Delete(json);
 
@@ -554,6 +646,8 @@ static esp_err_t handler_post_settings(httpd_req_t *req) {
 
 /* GET /api/peers — all known peers with status */
 static esp_err_t handler_get_peers(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
     microlink_t *ml = ctx->ml;
 
@@ -586,6 +680,8 @@ static esp_err_t handler_get_peers(httpd_req_t *req) {
 
 /* GET /api/peers/allowed — current allowlist */
 static esp_err_t handler_get_allowed(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     cJSON *json = cJSON_CreateObject();
@@ -611,6 +707,8 @@ static esp_err_t handler_get_allowed(httpd_req_t *req) {
 
 /* POST /api/peers/allowed — replace allowlist */
 static esp_err_t handler_post_allowed(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     char *body = read_post_body(req);
@@ -672,6 +770,8 @@ static esp_err_t handler_post_allowed(httpd_req_t *req) {
 
 /* DELETE /api/peers/allowed — clear allowlist */
 static esp_err_t handler_delete_allowed(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     if (xSemaphoreTake(ctx->peer_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -691,6 +791,8 @@ static esp_err_t handler_delete_allowed(httpd_req_t *req) {
 
 /* GET /api/monitor — temperature, RSSI, uptime, task stack watermarks */
 static esp_err_t handler_monitor(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
     microlink_t *ml = ctx->ml;
 
@@ -775,6 +877,8 @@ static esp_err_t handler_monitor(httpd_req_t *req) {
 
 /* POST /api/restart */
 static esp_err_t handler_restart(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"restarting\":true}");
 
@@ -784,12 +888,73 @@ static esp_err_t handler_restart(httpd_req_t *req) {
     return ESP_OK;  /* unreachable */
 }
 
+/* POST /api/password — change admin password (takes effect immediately) */
+static esp_err_t handler_password(httpd_req_t *req) {
+    ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
+    AUTH_GATE(req);
+
+    char *body = read_post_body(req);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    free(body);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *cur = cJSON_GetObjectItem(json, "current");
+    cJSON *neu = cJSON_GetObjectItem(json, "new");
+    if (!cur || !cJSON_IsString(cur) || !neu || !cJSON_IsString(neu)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "current and new required");
+        return ESP_FAIL;
+    }
+    const char *cur_pw = cur->valuestring;
+    const char *new_pw = neu->valuestring;
+    size_t new_len = strlen(new_pw);
+
+    /* current must match the stored password (constant-time compare) */
+    if (!ct_str_eq(cur_pw, ctx->settings.admin_pass)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "current password incorrect");
+        return ESP_FAIL;
+    }
+    /* new: 1..63 chars, must differ from current */
+    if (new_len == 0 || new_len > 63) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "new password must be 1-63 chars");
+        return ESP_FAIL;
+    }
+    if (ct_str_eq(new_pw, ctx->settings.admin_pass)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "new password must differ from current");
+        return ESP_FAIL;
+    }
+
+    memset(ctx->settings.admin_pass, 0, sizeof(ctx->settings.admin_pass));
+    strncpy(ctx->settings.admin_pass, new_pw, sizeof(ctx->settings.admin_pass) - 1);
+    cJSON_Delete(json);
+
+    config_save_settings(ctx);
+    ESP_LOGI(TAG, "Admin password changed via web UI");
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    return send_json(req, resp);
+}
+
 /* ============================================================================
  * WiFi List HTTP Handlers
  * ========================================================================== */
 
 /* GET /api/wifi — return WiFi list with masked passwords */
 static esp_err_t handler_get_wifi(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     cJSON *json = cJSON_CreateObject();
@@ -812,6 +977,8 @@ static esp_err_t handler_get_wifi(httpd_req_t *req) {
 
 /* POST /api/wifi — replace entire WiFi list */
 static esp_err_t handler_post_wifi(httpd_req_t *req) {
+    AUTH_GATE(req);
+
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     char *body = read_post_body(req);
@@ -891,6 +1058,65 @@ static esp_err_t handler_post_wifi(httpd_req_t *req) {
     cJSON_AddNumberToObject(resp, "count", ctx->wifi_list.count);
     cJSON_AddBoolToObject(resp, "restart_required", true);
     return send_json(req, resp);
+}
+
+/* Helper: WiFi auth mode → short display string */
+static const char *wifi_auth_mode_to_str(wifi_auth_mode_t m) {
+    switch (m) {
+        case WIFI_AUTH_OPEN:        return "open";
+        case WIFI_AUTH_WEP:         return "WEP";
+        case WIFI_AUTH_WPA_PSK:     return "WPA";
+        case WIFI_AUTH_WPA2_PSK:    return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:return "WPA/WPA2";
+        case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-EAP";
+        case WIFI_AUTH_WPA3_PSK:    return "WPA3";
+        case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+        default:                    return "?";
+    }
+}
+
+/* GET /api/wifi/scan — scan nearby APs (STA must be initialized) */
+static esp_err_t handler_wifi_scan(httpd_req_t *req) {
+    AUTH_GATE(req);
+
+    wifi_scan_config_t scan_cfg = {
+        .ssid = NULL, .bssid = NULL, .channel = 0,
+        .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = { .active = { .min = 50, .max = 120 } }
+    };
+    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan start failed");
+        return ESP_FAIL;
+    }
+
+    uint16_t num = 0;
+    if (esp_wifi_scan_get_ap_num(&num) != ESP_OK) num = 0;
+    if (num > 32) num = 32;
+
+    cJSON *json = cJSON_CreateObject();
+    if (!json) { esp_wifi_scan_stop(); return ESP_FAIL; }
+    cJSON *arr = cJSON_AddArrayToObject(json, "aps");
+
+    if (num > 0) {
+        wifi_ap_record_t *recs = heap_caps_malloc(num * sizeof(wifi_ap_record_t),
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (recs) {
+            if (esp_wifi_scan_get_ap_records(&num, recs) == ESP_OK) {
+                for (int i = 0; i < num; i++) {
+                    cJSON *a = cJSON_CreateObject();
+                    if (!a) continue;
+                    cJSON_AddStringToObject(a, "ssid", (const char *)recs[i].ssid);
+                    cJSON_AddNumberToObject(a, "rssi", recs[i].rssi);
+                    cJSON_AddStringToObject(a, "auth", wifi_auth_mode_to_str(recs[i].authmode));
+                    cJSON_AddItemToArray(arr, a);
+                }
+            }
+            free(recs);
+        }
+    }
+    esp_wifi_scan_stop();
+    return send_json(req, json);
 }
 
 /* ============================================================================
@@ -1104,7 +1330,7 @@ esp_err_t ml_config_httpd_start(ml_config_ctx_t *ctx, microlink_t *ml) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 14;
+    config.max_uri_handlers = 16;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
     esp_err_t err = httpd_start(&ctx->httpd, &config);
@@ -1125,8 +1351,10 @@ esp_err_t ml_config_httpd_start(ml_config_ctx_t *ctx, microlink_t *ml) {
         { .uri = "/api/peers/allowed", .method = HTTP_POST, .handler = handler_post_allowed,  .user_ctx = ctx },
         { .uri = "/api/peers/allowed", .method = HTTP_DELETE, .handler = handler_delete_allowed, .user_ctx = ctx },
         { .uri = "/api/restart",     .method = HTTP_POST,   .handler = handler_restart,       .user_ctx = ctx },
+        { .uri = "/api/password",    .method = HTTP_POST,   .handler = handler_password,      .user_ctx = ctx },
         { .uri = "/api/wifi",        .method = HTTP_GET,    .handler = handler_get_wifi,      .user_ctx = ctx },
         { .uri = "/api/wifi",        .method = HTTP_POST,   .handler = handler_post_wifi,     .user_ctx = ctx },
+        { .uri = "/api/wifi/scan",   .method = HTTP_GET,    .handler = handler_wifi_scan,     .user_ctx = ctx },
     };
 
     for (int i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {

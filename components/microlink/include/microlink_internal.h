@@ -440,6 +440,7 @@ struct microlink_s {
      * microlink_config_t are redirected here when NVS settings exist) */
     char nvs_auth_key[96];
     char nvs_device_name[48];
+    char nvs_advertise_routes[128];
 
     /* Control plane host override (empty = use ML_CTRL_HOST default).
      * Set from NVS at boot for Headscale/Ionscale/custom coordinators. */
