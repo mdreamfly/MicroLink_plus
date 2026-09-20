@@ -405,7 +405,9 @@ Set `ctrl_host` (web UI → Device Settings, or `ML_CONFIG_CTRL_HOST`) to point 
 
 ## License
 
-MIT License — see [LICENSE](LICENSE)
+Apache License 2.0 — see [LICENSE](LICENSE).
+
+Portions derived from the original MicroLink project are distributed under the MIT License — see [LICENSE-MIT](LICENSE-MIT).
 
 ## Acknowledgments
 
