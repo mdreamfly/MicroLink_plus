@@ -1,4 +1,4 @@
-# MicroLink v2 Web 配置页鉴权 设计
+# MicroLink v2 Web 配置页鉴权 + Subnets 可视化配置 设计
 
 日期: 2026-09-20
 状态: 已批准，进入实现
@@ -29,6 +29,7 @@
 | 鉴权范围 | 全部接口都要登录（含 `/`、`/api/status`、`/api/monitor` 等只读） |
 | 监听接口 | 所有接口（保持现状，HTTP 明文；tailnet 内 WireGuard 加密，LAN 内明文） |
 | 实现方案 | 方案 A：每个 handler 顶部统一鉴权门（宏 + helper） |
+| 追加：Subnets 配置 | 页面可视化编辑 advertise_routes（NVS 持久化），改后重启生效，无需重新烧录固件 |
 
 ## 架构
 
@@ -119,13 +120,46 @@ Settings 区后加「Security」极简卡片（复用现有 CSS 类，零新增�
   （触发浏览器重新弹登录框，旧凭据失效属预期行为）
 - HTML 增量 ~0.3KB，JS 增量 ~0.3KB
 
+### 6. Subnets（advertise_routes）可视化配置
+
+**背景**：subnet router 的通告路由目前只来自 Kconfig（`CONFIG_ML_ADVERTISE_ROUTES`），
+改路由必须重新编译烧录。本次把它纳入页面可视化编辑，NVS 持久化，改后重启生效。
+
+**① settings blob 追加 v4 字段（与 admin_pass 同批，均未发布过）**:
+
+```c
+char advertise_routes[128];  /* 逗号分隔 CIDR，如 "10.39.0.0/16" */
+```
+
+- `config_load_settings()`: 为空时 `SEED_STR` 从 `CONFIG_ML_ADVERTISE_ROUTES` 种子
+
+**② NVS 覆盖 Kconfig（`src/microlink.c`）** —— 沿用 `nvs_auth_key` 既有模式：
+- `struct microlink_s` 新增 `char nvs_advertise_routes[128];`
+- 在 L221 `ml_config_httpd_init()` 之后的 NVS 覆盖块内（L226-281）追加：
+  `ml_config_get_advertise_routes()` → 非空则拷贝进 `nvs_advertise_routes` 并
+  令 `ml->config.advertise_routes = ml->nvs_advertise_routes;`（NVS 优先于 Kconfig/app）
+
+**③ `ml_config_httpd.h` 新增 getter**：`const char *ml_config_get_advertise_routes(ctx)`
+
+**④ HTTP API（`src/ml_config_httpd.c`）**：
+- `GET /api/settings` 响应加 `advertise_routes` 字符串
+- `POST /api/settings` 解析 `advertise_routes` 字段（COPY_STR_FIELD），保存后仍返回
+  `restart_required: true`（与其它设置一致）
+
+**⑤ 前端 Settings 表单**：
+- 输入框 `id='advertise_routes'`，hint 提示格式 `e.g. 10.39.0.0/16, 192.168.1.0/24`
+- `loadSettings()` 回填、`saveSettings()` 提交
+
+**生效方式**：保存 → 重启（页面已有 Restart 按钮）→ 控制面按新路由通告。
+不做热生效（config 结构按设计为 init 后只读，跨任务同步改动风险大于收益）。
+
 ## 体积影响
 
 | 项 | 增量 |
 |---|---|
 | 鉴权代码（mbedtls 已链接，零新增依赖） | ~250B flash |
-| settings blob +64B | NVS 无压力 |
-| 页面 Security 区 | ~0.6KB flash |
+| settings blob +64B（admin_pass）+128B（advertise_routes） | NVS 无压力 |
+| 页面 Security 区 + Advertise Routes 输入框 | ~0.8KB flash |
 | Kconfig 项 | 忽略 |
 
 1500K 分区（SINGLE_APP_LARGE）充足。
@@ -147,3 +181,6 @@ Settings 区后加「Security」极简卡片（复用现有 CSS 类，零新增�
 5. `POST /api/password` 改密 → 旧密码 401，新密码 200
 6. 浏览器：登录框 → 仪表盘 → 改密 → 重登录
 7. 回归：`/api/wifi`、`/api/settings`、`/api/peers/allowed` 带凭据下功能不变
+8. Subnets：`GET /api/settings` 返回 `advertise_routes`（应为 `10.39.0.0/16`，
+   来自 NVS 种子）；POST 修改后重启，日志出现 `Subnet router mode: advertising routes <新值>`，
+   且控制面请求 `RoutableIPs` 带新路由
